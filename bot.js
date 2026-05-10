@@ -3,12 +3,17 @@
 
 const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
-const qrcode = require('qrcode-terminal');
 const pino = require('pino');
+const readline = require('readline');
 const { procesarMensaje } = require('./flujo');
 
 // Número del reclutador que recibe notificaciones (con código de país, sin +)
 const NUMERO_RECLUTADOR = '527261616412';
+
+function pregunta(texto) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise(resolve => rl.question(texto, ans => { rl.close(); resolve(ans.trim()); }));
+}
 
 async function iniciarBot() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
@@ -19,17 +24,19 @@ async function iniciarBot() {
     logger: pino({ level: 'silent' }),
   });
 
+  // Usar código de emparejamiento si no hay sesión guardada
+  if (!state.creds.registered) {
+    const numero = await pregunta('📱 Ingresa el número de WhatsApp del bot (con código de país, sin +, ej: 5215512345678): ');
+    const codigo = await sock.requestPairingCode(numero);
+    console.log(`\n✅ Tu código de emparejamiento es: ${codigo}`);
+    console.log('👉 En WhatsApp ve a: ⋮ → Dispositivos vinculados → Vincular con número de teléfono');
+    console.log('   Ingresa el código de 8 dígitos que aparece arriba\n');
+  }
+
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      console.clear();
-      console.log('\n📱 Escanea este QR con WhatsApp para conectar a Meli:\n');
-      qrcode.generate(qr, { small: true });
-      console.log('\nWhatsApp → ⋮ → Dispositivos vinculados → Vincular dispositivo\n');
-    }
+    const { connection, lastDisconnect } = update;
 
     if (connection === 'close') {
       const debeReconectar = new Boom(lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
