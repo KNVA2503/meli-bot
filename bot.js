@@ -48,8 +48,13 @@ async function iniciarBot() {
     const { connection, lastDisconnect } = update;
 
     if (connection === 'close') {
-      const debeReconectar = new Boom(lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-      if (debeReconectar) {
+      const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      // Si estamos en proceso de pairing, no reconectar
+      if (usarPairingCode && statusCode !== DisconnectReason.loggedOut) {
+        console.log('\n⏳ Esperando que ingreses el código en WhatsApp...');
+        return;
+      }
+      if (statusCode !== DisconnectReason.loggedOut) {
         console.log('🔄 Reconectando...');
         iniciarBot();
       } else {
