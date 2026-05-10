@@ -1,106 +1,99 @@
-// bot.js — Bot de reclutamiento Meli para WhatsApp
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
-const { Boom } = require('@hapi/boom');
-const pino = require('pino');
-const readline = require('readline');
+// bot.js — Bot de reclutamiento Meli usando whatsapp-web.js
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode');
+const express = require('express');
 const { procesarMensaje } = require('./flujo');
 
-const NUMERO_RECLUTADOR = '527261616412';
+const NUMERO_RECLUTADOR = '527261616412@c.us';
 
-function pregunta(texto) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(resolve => rl.question(texto, ans => { rl.close(); resolve(ans.trim()); }));
-}
+// Servidor web para mostrar el QR
+const app = express();
+let qrActual = '';
 
-async function iniciarBot() {
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-
-  const usarPairingCode = !state.creds.registered;
-  let numeroBot = '';
-
-  if (usarPairingCode) {
-    numeroBot = await pregunta('📱 Número de WhatsApp del bot (sin +, ej: 5215512345678): ');
+app.get('/', (req, res) => {
+  if (!qrActual) {
+    res.send('<h2>Esperando QR... recarga en unos segundos</h2><script>setTimeout(()=>location.reload(),3000)</script>');
+    return;
   }
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>Meli Bot — Escanea el QR</title></head>
+    <body style="display:flex;flex-direction:column;align-items:center;font-family:Arial;padding:20px">
+      <h2>📱 Escanea con WhatsApp</h2>
+      <p>WhatsApp → ⋮ → Dispositivos vinculados → Vincular dispositivo</p>
+      <img id="qr" src="/qr.png" style="width:300px;border:2px solid #ccc;border-radius:8px">
+      <p style="color:gray">La página se recarga automáticamente si el QR expira</p>
+      <script>setTimeout(()=>location.reload(),30000)</script>
+    </body>
+    </html>
+  `);
+});
 
-  const sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: false,
-    logger: pino({ level: 'silent' }),
-  });
+app.get('/qr.png', async (req, res) => {
+  if (!qrActual) return res.status(404).send('Sin QR');
+  const buf = await qrcode.toBuffer(qrActual);
+  res.type('png').send(buf);
+});
 
-  sock.ev.on('creds.update', saveCreds);
+app.listen(3000, () => {
+  console.log('🌐 Abre en tu navegador: http://localhost:3000');
+  console.log('   Escanea el QR con WhatsApp para conectar a Meli\n');
+});
 
-  // Solicitar pairing code cuando el socket está listo
-  if (usarPairingCode) {
-    setTimeout(async () => {
-      try {
-        const codigo = await sock.requestPairingCode(numeroBot);
-        console.log(`\n🔑 Código de emparejamiento: ${codigo}`);
-        console.log('👉 WhatsApp → ⋮ → Dispositivos vinculados → Vincular con número de teléfono');
-        console.log('   Ingresa ese código de 8 dígitos\n');
-      } catch (e) {
-        console.log('No se pudo obtener el código. Reinicia con: rmdir /s /q auth_info && node bot.js');
-      }
-    }, 3000);
+// Cliente de WhatsApp
+const client = new Client({
+  authStrategy: new LocalAuth(),
+  puppeteer: {
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
   }
+});
 
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update;
+client.on('qr', (qr) => {
+  qrActual = qr;
+  console.log('📱 QR listo — abre http://localhost:3000 en tu navegador');
+});
 
-    if (connection === 'close') {
-      const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      // Si estamos en proceso de pairing, no reconectar
-      if (usarPairingCode && statusCode !== DisconnectReason.loggedOut) {
-        console.log('\n⏳ Esperando que ingreses el código en WhatsApp...');
-        return;
-      }
-      if (statusCode !== DisconnectReason.loggedOut) {
-        console.log('🔄 Reconectando...');
-        iniciarBot();
-      } else {
-        console.log('👋 Sesión cerrada. Ejecuta: rmdir /s /q auth_info && node bot.js');
-      }
+client.on('ready', () => {
+  qrActual = '';
+  console.log('✅ Meli está conectada y lista para recibir candidatos!');
+});
+
+client.on('disconnected', (reason) => {
+  console.log('❌ Meli desconectada:', reason);
+  console.log('🔄 Reiniciando...');
+  client.initialize();
+});
+
+client.on('message', async (msg) => {
+  // Ignorar mensajes de grupos y estados
+  if (msg.from.includes('@g.us') || msg.from === 'status@broadcast') return;
+
+  const telefono = msg.from.replace('@c.us', '');
+  const texto = msg.body;
+
+  if (!texto) return;
+
+  console.log(`📩 Mensaje de ${telefono}: ${texto}`);
+
+  try {
+    const resultado = procesarMensaje(telefono, texto);
+    const respuesta = typeof resultado === 'string' ? resultado : resultado.mensaje;
+
+    await msg.reply(respuesta);
+    console.log(`✉️  Respuesta enviada a ${telefono}`);
+
+    // Notificar al reclutador cuando se registre un candidato
+    if (resultado.notificar) {
+      const notificacion = `🔔 *Nuevo candidato — Mercado Libre CEDIS Mex06*\n\n${resultado.resumen}\n\n_Notificación automática de Meli_`;
+      await client.sendMessage(NUMERO_RECLUTADOR, notificacion);
+      console.log(`🔔 Reclutador notificado`);
     }
-
-    if (connection === 'open') {
-      console.log('✅ Meli está conectada y lista para recibir candidatos!');
-    }
-  });
-
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-
-    for (const msg of messages) {
-      if (msg.key.fromMe) continue;
-      if (msg.key.remoteJid.includes('@g.us')) continue;
-
-      const telefono = msg.key.remoteJid.replace('@s.whatsapp.net', '');
-      const texto = msg.message?.conversation
-        || msg.message?.extendedTextMessage?.text
-        || '';
-
-      if (!texto) continue;
-
-      console.log(`📩 Mensaje de ${telefono}: ${texto}`);
-
-      try {
-        const resultado = procesarMensaje(telefono, texto);
-        const respuesta = typeof resultado === 'string' ? resultado : resultado.mensaje;
-
-        await sock.sendMessage(msg.key.remoteJid, { text: respuesta });
-        console.log(`✉️  Respuesta enviada`);
-
-        if (resultado.notificar && NUMERO_RECLUTADOR) {
-          const notificacion = `🔔 *Nuevo candidato — Mercado Libre CEDIS Mex06*\n\n${resultado.resumen}\n\n_Notificación automática de Meli_`;
-          await sock.sendMessage(`${NUMERO_RECLUTADOR}@s.whatsapp.net`, { text: notificacion });
-          console.log(`🔔 Reclutador notificado`);
-        }
-      } catch (err) {
-        console.error('Error:', err.message);
-      }
-    }
-  });
-}
+  } catch (err) {
+    console.error('Error procesando mensaje:', err.message);
+  }
+});
 
 console.log('🤖 Iniciando Meli — Bot de Reclutamiento Mercado Libre...');
-iniciarBot();
+client.initialize();
