@@ -15,7 +15,7 @@ async function iniciarBot() {
 
   const sock = makeWASocket({
     auth: state,
-    printQRInTerminal: true,
+    printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
   });
 
@@ -25,8 +25,10 @@ async function iniciarBot() {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
+      console.clear();
       console.log('\n📱 Escanea este QR con WhatsApp para conectar a Meli:\n');
       qrcode.generate(qr, { small: true });
+      console.log('\nWhatsApp → ⋮ → Dispositivos vinculados → Vincular dispositivo\n');
     }
 
     if (connection === 'close') {
